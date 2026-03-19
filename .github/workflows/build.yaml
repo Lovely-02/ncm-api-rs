@@ -1,0 +1,136 @@
+name: 自动检测ncm-api-rs并构建二进制
+
+on:
+  schedule:
+    - cron: '0 0/12 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+  actions: write
+
+env:
+  APP_NAME: ncm-server
+
+jobs:
+  build:
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      matrix:
+        platform:
+          # Windows 平台
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            label: windows-x86_64
+          # Linux 平台
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            label: linux-x86_64
+          # macOS 平台
+          - runner: macos-latest
+            target: x86_64-apple-darwin
+            label: macos-x86_64
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            label: macos-aarch64
+
+    steps:
+      - name: 检出本仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 检出原始代码库
+        uses: actions/checkout@v4
+        with:
+          repository: imsyy/ncm-api-rs
+          ref: main
+          fetch-depth: 0
+          path: src
+
+      - name: 获取最新提交哈希
+        id: last_commit
+        run: |
+          cd src && echo "hash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      - name: 检查缓存是否存在
+        id: cache
+        uses: actions/cache@v3
+        with:
+          path: src/.git
+          key: ${{ runner.os }}-git-${{ steps.last_commit.outputs.hash }}
+
+      - name: 设置 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 设置 Rust 缓存
+        uses: swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ env.APP_NAME}}
+          workspaces: src
+
+      - name: 添加目标平台
+        run: rustup target add ${{ matrix.platform.target }}
+
+      - name: 构建项目
+        if: (github.event_name == 'schedule' && steps.cache.outputs.cache-hit != 'true') || github.event_name == 'workflow_dispatch'
+        run: cd src && cargo build --release --features server --bin ncm-server --target ${{ matrix.platform.target }}
+
+      - name: 上传构建文件
+        if: (github.event_name == 'schedule' && steps.cache.outputs.cache-hit != 'true') || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: '${{ env.APP_NAME }}-${{ matrix.platform.label }}'
+          path: |
+            src/target/${{ matrix.platform.target }}/release/${{ env.APP_NAME }}*
+            !src/target/${{ matrix.platform.target }}/release/${{ env.APP_NAME }}.d
+            !src/target/${{ matrix.platform.target }}/release/${{ env.APP_NAME }}.pdb
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && needs.build.result == 'success')
+    steps:
+      - name: 检出本仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 检出原始代码库
+        uses: actions/checkout@v4
+        with:
+          repository: imsyy/ncm-api-rs
+          ref: main
+          fetch-depth: 0
+          path: src
+
+      - name: 下载所有构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 准备发布文件
+        run: |
+          mkdir -p release
+          cp artifacts/ncm-server-windows-x86_64/ncm-server.exe release/ncm-server-windows-x86_64.exe
+          cp artifacts/ncm-server-linux-x86_64/ncm-server release/ncm-server-linux-x86_64
+          cp artifacts/ncm-server-macos-x86_64/ncm-server release/ncm-server-macos-x86_64
+          cp artifacts/ncm-server-macos-aarch64/ncm-server release/ncm-server-macos-aarch64
+          ls -la release
+
+      - name: 获取最新提交信息
+        id: commit_info
+        run: |
+          cd src && echo "message=$(git log -1 --pretty=%B)" >> $GITHUB_OUTPUT
+
+      - name: 发布到 Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest Release
+          body: ${{ steps.commit_info.outputs.message }}
+          files: release/*
+          overwrite_files: true
+          draft: false
+          prerelease: false

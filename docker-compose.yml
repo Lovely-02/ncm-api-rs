@@ -1,0 +1,10 @@
+services:
+  ncm-api-rs:
+    image: docker.1ms.run/lovely02/ncm-api-rs:main
+    container_name: ncm-api-rs
+    ports:
+      - '3176:3000'
+    privileged: true
+    restart: always
+    environment:
+      - TZ=Asia/Shanghai
